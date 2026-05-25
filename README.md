@@ -70,6 +70,42 @@ You can deploy your own copy to Vercel in a few clicks:
 3. No environment variables needed — just deploy
 4. Your server will be at `https://your-project.vercel.app/mcp`
 
+### Docker
+
+Build and run locally:
+
+```bash
+docker buildx build --platform linux/amd64 -t excalidraw-mcp:local --load .
+docker run --rm -p 3001:3001 excalidraw-mcp:local
+```
+
+Endpoints:
+
+- `GET /healthz`
+- `POST /mcp`
+
+### k3s / Kubernetes
+
+Example manifests live in `deploy/k8s/`.
+
+1. Build and push your image
+   Multi-arch example:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/maluberian/excalidraw-mcp:latest \
+  --push .
+```
+
+2. Update `deploy/k8s/deployment.yaml` with your real image tag
+3. Update `deploy/k8s/ingress.yaml` with your real ingress annotations if needed
+4. Apply:
+
+```bash
+kubectl apply -f deploy/k8s/
+```
+
 ### Release checklist
 
 <details>
