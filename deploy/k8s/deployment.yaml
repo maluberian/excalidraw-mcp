@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: excalidraw-mcp
-          image: ghcr.io/maluberian/excalidraw-mcp:latest
+          image: registry.local/excalidraw-mcp:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

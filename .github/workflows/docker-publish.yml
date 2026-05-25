@@ -8,11 +8,15 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   docker:
     runs-on: ubuntu-latest
+    env:
+      LOCAL_REGISTRY_HOST: ${{ vars.LOCAL_REGISTRY_HOST }}
+      LOCAL_REGISTRY_REPOSITORY: ${{ vars.LOCAL_REGISTRY_REPOSITORY }}
+      LOCAL_REGISTRY_USERNAME: ${{ secrets.LOCAL_REGISTRY_USERNAME }}
+      LOCAL_REGISTRY_PASSWORD: ${{ secrets.LOCAL_REGISTRY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,21 +24,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve image target
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${LOCAL_REGISTRY_HOST:?Set repository variable LOCAL_REGISTRY_HOST to your local registry hostname}"
+          image_repo="${LOCAL_REGISTRY_REPOSITORY:-excalidraw-mcp}"
+          echo "image=${LOCAL_REGISTRY_HOST}/${image_repo}" >> "$GITHUB_OUTPUT"
 
-      - name: Extract image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=latest
-            type=sha
+      - name: Log in to local registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${LOCAL_REGISTRY_USERNAME}" && -n "${LOCAL_REGISTRY_PASSWORD}" ]]; then
+            echo "${LOCAL_REGISTRY_PASSWORD}" | docker login "${LOCAL_REGISTRY_HOST}" --username "${LOCAL_REGISTRY_USERNAME}" --password-stdin
+          else
+            echo "No LOCAL_REGISTRY_USERNAME / LOCAL_REGISTRY_PASSWORD configured; assuming anonymous push access."
+          fi
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -42,5 +49,6 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ steps.registry.outputs.image }}:latest
+            ${{ steps.registry.outputs.image }}:sha-${{ github.sha }}

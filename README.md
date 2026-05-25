@@ -8,25 +8,15 @@ MCP server that streams hand-drawn Excalidraw diagrams with smooth viewport came
 
 Works with any client that supports [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps) — Claude, ChatGPT, VS Code, Goose, and others. If something doesn't work, please [open an issue](https://github.com/antonpk1/excalidraw-mcp-app/issues).
 
-### Remote (recommended)
-
-### `https://mcp.excalidraw.com`
-
-For apps that don't yet have an official integration, you can add a custom MCP / connector (naming can vary between apps).
-
 ### Local
 
-**Option A: Download Extension**
-
-1. Download `excalidraw-mcp-app.mcpb` from [Releases](https://github.com/antonpk1/excalidraw-mcp-app/releases)
-2. Double-click to install in Claude Desktop
-
-**Option B: Build from Source**
+Build from source:
 
 ```bash
 git clone https://github.com/excalidraw/excalidraw-mcp.git
-cd excalidraw-mcp-app
-pnpm install && pnpm run build
+cd excalidraw-mcp
+corepack pnpm install
+corepack pnpm build
 ```
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
@@ -61,18 +51,9 @@ Text responses can only go so far. Sometimes users need to interact with data, n
 
 PRs welcome! See [Local](#local) above for build instructions.
 
-### Deploy your own instance
-
-You can deploy your own copy to Vercel in a few clicks:
-
-1. Fork this repo
-2. Go to [vercel.com/new](https://vercel.com/new) and import your fork
-3. No environment variables needed — just deploy
-4. Your server will be at `https://your-project.vercel.app/mcp`
-
 ### Docker
 
-Build and run locally:
+Build and run locally with Docker:
 
 ```bash
 docker buildx build --platform linux/amd64 -t excalidraw-mcp:local --load .
@@ -86,44 +67,46 @@ Endpoints:
 
 ### k3s / Kubernetes
 
-Example manifests live in `deploy/k8s/`.
+Example manifests live in `deploy/k8s/` and assume:
 
-1. Build and push your image
-   Multi-arch example:
+- ingress hostname: `excalidraw-mcp.sitesoftllc.net`
+- nginx ingress
+- cert-manager issuer `letsencrypt-prod`
+
+1. Build and push a multi-arch image to your local registry mirror.
 
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/maluberian/excalidraw-mcp:latest \
+  -t REGISTRY_HOST/excalidraw-mcp:latest \
   --push .
 ```
 
-2. Update `deploy/k8s/deployment.yaml` with your real image tag
-3. Update `deploy/k8s/ingress.yaml` with your real ingress annotations if needed
-4. Apply:
+2. Update [deploy/k8s/deployment.yaml](/home/openclaw/projects/excalidraw-mcp/deploy/k8s/deployment.yaml) so `image:` points at your local registry.
+3. Apply the manifests:
 
 ```bash
-kubectl apply -f deploy/k8s/
+kubectl apply -k deploy/k8s/
 ```
 
-### Release checklist
-
-<details>
-<summary>For maintainers</summary>
+4. Confirm the service:
 
 ```bash
-# 1. Bump version in manifest.json and package.json
-# 2. Build and pack
-pnpm run build && mcpb pack .
-
-# 3. Create GitHub release
-gh release create v0.3.0 excalidraw-mcp-app.mcpb --title "v0.3.0" --notes "What changed"
-
-# 4. Deploy to Vercel
-vercel --prod
+kubectl get pods -n excalidraw-mcp
+kubectl get ingress -n excalidraw-mcp
 ```
 
-</details>
+### GitHub Actions image publishing
+
+The workflow in `.github/workflows/docker-publish.yml` is set up to push to a local registry mirror instead of GHCR.
+
+Configure these GitHub repository settings before enabling it:
+
+- Repository variable: `LOCAL_REGISTRY_HOST`
+- Optional repository variable: `LOCAL_REGISTRY_REPOSITORY`
+- Optional repository secrets: `LOCAL_REGISTRY_USERNAME`, `LOCAL_REGISTRY_PASSWORD`
+
+If `LOCAL_REGISTRY_REPOSITORY` is not set, the workflow defaults to `excalidraw-mcp`.
 
 ## Credits
 
