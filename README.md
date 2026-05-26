@@ -40,6 +40,23 @@ Example prompts:
 - "Draw a cute cat using excalidraw"
 - "Draw an architecture diagram showing a user connecting to an API server which talks to a database"
 
+### Self-hosted Excalidraw room export
+
+This fork can persist the current diagram directly into a self-hosted Excalidraw collaboration room by writing encrypted scene data into Firestore `scenes/{roomId}`.
+
+Set these environment variables on the MCP server if you want the UI's share button to target your room by default:
+
+```bash
+EXCALIDRAW_SELF_HOSTED_ROOM_URL='https://excalidraw.example.net/#room=<roomId>,<roomKey>'
+EXCALIDRAW_FIREBASE_CONFIG='{"apiKey":"...","projectId":"...","authDomain":"...","databaseURL":"...","storageBucket":"...","messagingSenderId":"...","appId":"..."}'
+```
+
+Notes:
+
+- `EXCALIDRAW_SELF_HOSTED_ROOM_URL` is optional for server-side tool calls, but required if you want the UI button to open a shared room instead of `excalidraw.com`.
+- `EXCALIDRAW_FIREBASE_CONFIG` defaults to the current `sitesoftllc.net` deployment values in this fork. Override it if your room persistence backend differs.
+- The current adapter writes scene elements only. Live websocket broadcast and binary file persistence are still separate follow-up work.
+
 ## What are MCP Apps and how can I build one?
 
 Text responses can only go so far. Sometimes users need to interact with data, not just read about it. [MCP Apps](https://github.com/modelcontextprotocol/ext-apps/) is an official Model Context Protocol extension that lets servers return interactive HTML interfaces (data visualizations, forms, dashboards) that render directly in the chat.
@@ -95,18 +112,6 @@ kubectl apply -k deploy/k8s/
 kubectl get pods -n excalidraw-mcp
 kubectl get ingress -n excalidraw-mcp
 ```
-
-### GitHub Actions image publishing
-
-The workflow in `.github/workflows/docker-publish.yml` is set up to push to a local registry mirror instead of GHCR.
-
-Configure these GitHub repository settings before enabling it:
-
-- Repository variable: `LOCAL_REGISTRY_HOST`
-- Optional repository variable: `LOCAL_REGISTRY_REPOSITORY`
-- Optional repository secrets: `LOCAL_REGISTRY_USERNAME`, `LOCAL_REGISTRY_PASSWORD`
-
-If `LOCAL_REGISTRY_REPOSITORY` is not set, the workflow defaults to `excalidraw-mcp`.
 
 ## Credits
 

@@ -7,6 +7,7 @@ import path from "node:path";
 import { deflateSync } from "node:zlib";
 import { z } from "zod/v4";
 import type { CheckpointStore } from "./checkpoint-store.js";
+import { getDefaultSelfHostedRoomUrl, saveSceneToSelfHostedRoom } from "./self-hosted-room.js";
 
 /** Maximum allowed size for element/data input strings (5 MB). */
 const MAX_INPUT_BYTES = 5 * 1024 * 1024;
@@ -601,6 +602,42 @@ However, if the user wants to edit something on this diagram "${checkpointId}", 
   );
 
   // ============================================================
+  // Tool 3b: export_to_self_hosted_room (server-side room persistence)
+  // Called by widget or model.
+  // ============================================================
+  registerAppTool(server,
+    "export_to_self_hosted_room",
+    {
+      description: "Write diagram state into a self-hosted Excalidraw collaboration room.",
+      inputSchema: {
+        json: z.string().describe("Serialized Excalidraw JSON"),
+        roomUrl: z.string().optional().describe("Optional room URL with #room=<roomId>,<roomKey>"),
+      },
+      _meta: { ui: { visibility: ["all"] } },
+    },
+    async ({ json, roomUrl }): Promise<CallToolResult> => {
+      if (json.length > MAX_INPUT_BYTES) {
+        return {
+          content: [{ type: "text", text: `Export data exceeds ${MAX_INPUT_BYTES} byte limit.` }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await saveSceneToSelfHostedRoom({ json, roomUrl });
+        return {
+          content: [{ type: "text", text: result.roomUrl }],
+          structuredContent: result,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Room export failed: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ============================================================
   // Tool 4: save_checkpoint (private — widget only, for user edits)
   // ============================================================
   registerAppTool(server,
@@ -664,11 +701,12 @@ However, if the user wants to edit something on this diagram "${checkpointId}", 
     { mimeType: RESOURCE_MIME_TYPE },
     async (): Promise<ReadResourceResult> => {
       const html = await fs.readFile(path.join(distDir, "mcp-app.html"), "utf-8");
+      const injectedConfig = `<script>window.__EXCALIDRAW_SELF_HOSTED_ROOM_URL__=${JSON.stringify(getDefaultSelfHostedRoomUrl())};</script>`;
       return {
         contents: [{
           uri: resourceUri,
           mimeType: RESOURCE_MIME_TYPE,
-          text: html,
+          text: html.replace("</head>", `${injectedConfig}</head>`),
           _meta: {
             ui: {
               ...cspMeta.ui,
