@@ -59,6 +59,8 @@ Notes:
 - The current adapter writes scene elements to Firestore and also emits a live `SCENE_UPDATE` broadcast to the collaboration room.
 - Removed elements are sent as tombstones during live sync so connected clients can reconcile deletions.
 - Image and binary file payloads are uploaded to Firebase Storage under the room file prefix, using the same encrypted/compressed format Excalidraw expects.
+- `export_to_self_hosted_room` returns structured metadata about uploaded files, skipped unreferenced file payloads, and orphan-candidate file IDs from the previous room state.
+- `inspect_self_hosted_room` summarizes the persisted room state so you can inspect element counts, referenced file IDs, and cleanup-candidate file IDs without manually decoding the backend payload.
 
 ## What are MCP Apps and how can I build one?
 

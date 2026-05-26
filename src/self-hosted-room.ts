@@ -53,11 +53,40 @@ type SaveSceneArgs = {
   roomUrl?: string;
 };
 
+type InspectRoomArgs = {
+  roomUrl?: string;
+};
+
+type RoomSceneSummary = {
+  activeElements: number;
+  activeImageElements: number;
+  cleanupCandidateFileIds: string[];
+  deletedElements: number;
+  fileIdsReferenced: string[];
+  imageElements: number;
+  missingFileIds: string[];
+  totalElements: number;
+  unreferencedFileIds: string[];
+};
+
 type RoomSaveResult = {
   broadcastedLiveUpdate: boolean;
+  orphanedFileIds: string[];
+  previousSceneVersion: number;
   roomId: string;
   roomUrl: string;
   sceneVersion: number;
+  skippedUnreferencedFileIds: string[];
+  summary: RoomSceneSummary;
+  totalUploadedBytes: number;
+  uploadedFileIds: string[];
+};
+
+type RoomInspectionResult = {
+  roomId: string;
+  roomUrl: string;
+  sceneVersion: number;
+  summary: RoomSceneSummary;
 };
 
 const DEFAULT_ROOM_URL = process.env.EXCALIDRAW_SELF_HOSTED_ROOM_URL ?? "";
@@ -83,6 +112,20 @@ const CONCAT_BUFFERS_VERSION = 1;
 const VERSION_DATAVIEW_BYTES = 4;
 const NEXT_CHUNK_SIZE_DATAVIEW_BYTES = 4;
 let firebaseApp: FirebaseApp | null = null;
+
+function sortedStrings(values: Iterable<string>): string[] {
+  return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
 
 function parseFirebaseConfig(): FirebaseConfig {
   let parsed: unknown;
@@ -154,6 +197,55 @@ function decodeSceneJson(json: string): {
       typeof (parsed as { files?: Record<string, BinaryFileLike> }).files === "object"
         ? (parsed as { files: Record<string, BinaryFileLike> }).files
         : {},
+  };
+}
+
+function getReferencedFileIds(elements: ExcalidrawElementLike[]): Set<string> {
+  return new Set(
+    elements.flatMap((element) =>
+      !element.isDeleted && element.type === "image" && element.fileId ? [element.fileId] : [],
+    ),
+  );
+}
+
+function getDeletedFileIds(elements: ExcalidrawElementLike[]): Set<string> {
+  return new Set(
+    elements.flatMap((element) =>
+      element.isDeleted && element.type === "image" && element.fileId ? [element.fileId] : [],
+    ),
+  );
+}
+
+function difference(left: Iterable<string>, right: Iterable<string>): string[] {
+  const rightSet = new Set(right);
+  return sortedStrings(Array.from(left).filter((value) => !rightSet.has(value)));
+}
+
+function createSceneSummary(
+  elements: ExcalidrawElementLike[],
+  files: Record<string, BinaryFileLike> = {},
+  assumedExistingFileIds: Iterable<string> = [],
+): RoomSceneSummary {
+  const totalElements = elements.length;
+  const activeElements = elements.filter((element) => !element.isDeleted);
+  const deletedElements = totalElements - activeElements.length;
+  const imageElements = elements.filter((element) => element.type === "image").length;
+  const activeImageElements = activeElements.filter((element) => element.type === "image").length;
+  const referencedFileIds = getReferencedFileIds(elements);
+  const providedFileIds = new Set(Object.keys(files));
+  const availableFileIds = new Set([...providedFileIds, ...assumedExistingFileIds]);
+  const deletedFileIds = getDeletedFileIds(elements);
+
+  return {
+    totalElements,
+    activeElements: activeElements.length,
+    deletedElements,
+    imageElements,
+    activeImageElements,
+    fileIdsReferenced: sortedStrings(referencedFileIds),
+    missingFileIds: difference(referencedFileIds, availableFileIds),
+    unreferencedFileIds: difference(providedFileIds, referencedFileIds),
+    cleanupCandidateFileIds: difference(deletedFileIds, referencedFileIds),
   };
 }
 
@@ -311,20 +403,32 @@ async function saveFilesToFirebaseStorage(
   roomId: string,
   roomKey: string,
   files: Record<string, BinaryFileLike>,
-): Promise<Set<string>> {
+  fileIdsToUpload: Set<string>,
+): Promise<{
+  skippedUnreferencedFileIds: string[];
+  totalUploadedBytes: number;
+  uploadedFileIds: string[];
+}> {
   const storage = getStorage(getFirebaseApp(firebaseConfig));
-  const savedFileIds = new Set<string>();
+  const uploadedFileIds = new Set<string>();
   const fileEntries = Object.entries(files);
+  const skippedUnreferencedFileIds = difference(
+    new Set(fileEntries.map(([fileId]) => fileId)),
+    fileIdsToUpload,
+  );
+  const oversizedFiles: string[] = [];
+  let totalUploadedBytes = 0;
 
   await Promise.all(
     fileEntries.map(async ([fileId, fileData]) => {
-      if (!fileData?.dataURL) {
+      if (!fileIdsToUpload.has(fileId) || !fileData?.dataURL) {
         return;
       }
 
       const sourceBytes = new TextEncoder().encode(fileData.dataURL);
       if (sourceBytes.byteLength > FILE_UPLOAD_MAX_BYTES) {
-        throw new Error(`File ${fileId} exceeds ${Math.trunc(FILE_UPLOAD_MAX_BYTES / 1024 / 1024)}MB.`);
+        oversizedFiles.push(`${fileId} (${formatBytes(sourceBytes.byteLength)})`);
+        return;
       }
 
       const encodedFile = await encodeFileForUpload(fileId, fileData, roomKey);
@@ -334,11 +438,22 @@ async function saveFilesToFirebaseStorage(
         cacheControl: `public, max-age=${FILE_CACHE_MAX_AGE_SEC}`,
         contentType: "application/octet-stream",
       });
-      savedFileIds.add(fileId);
+      totalUploadedBytes += sourceBytes.byteLength;
+      uploadedFileIds.add(fileId);
     }),
   );
 
-  return savedFileIds;
+  if (oversizedFiles.length) {
+    throw new Error(
+      `Files exceed ${Math.trunc(FILE_UPLOAD_MAX_BYTES / 1024 / 1024)}MB each: ${oversizedFiles.join(", ")}`,
+    );
+  }
+
+  return {
+    uploadedFileIds: sortedStrings(uploadedFileIds),
+    skippedUnreferencedFileIds,
+    totalUploadedBytes,
+  };
 }
 
 function markUploadedImageElements(
@@ -497,18 +612,28 @@ export async function saveSceneToSelfHostedRoom({
   const firebaseConfig = parseFirebaseConfig();
   const room = resolveRoomUrl(roomUrl);
   const { elements, files } = decodeSceneJson(json);
-  const savedFileIds = await saveFilesToFirebaseStorage(
-    firebaseConfig,
-    room.roomId,
-    room.roomKey,
-    files,
-  );
-  const persistedElements = markUploadedImageElements(elements, savedFileIds);
   const { document, sceneVersion: previousVersion } = await readExistingScene(
     firebaseConfig.projectId,
     room.roomId,
   );
   const previousElements = document ? await decryptElements(room.roomKey, document) : [];
+  const previousFileIds = getReferencedFileIds(previousElements);
+  const summary = createSceneSummary(elements, files, previousFileIds);
+  if (summary.missingFileIds.length) {
+    throw new Error(
+      `Image elements reference missing files: ${summary.missingFileIds.join(", ")}`,
+    );
+  }
+  const fileIdsToUpload = new Set(summary.fileIdsReferenced.filter((fileId) => !previousFileIds.has(fileId)));
+  const { uploadedFileIds, skippedUnreferencedFileIds, totalUploadedBytes } =
+    await saveFilesToFirebaseStorage(
+      firebaseConfig,
+      room.roomId,
+      room.roomKey,
+      files,
+      fileIdsToUpload,
+    );
+  const persistedElements = markUploadedImageElements(elements, new Set(uploadedFileIds));
   const broadcastElements = buildBroadcastElements(persistedElements, previousElements);
   const { ciphertext, iv } = await encryptElements(room.roomKey, persistedElements);
   const nextVersion = previousVersion + 1;
@@ -542,9 +667,32 @@ export async function saveSceneToSelfHostedRoom({
 
   return {
     broadcastedLiveUpdate,
+    previousSceneVersion: previousVersion,
     roomUrl: room.roomUrl,
     roomId: room.roomId,
     sceneVersion: nextVersion,
+    uploadedFileIds,
+    skippedUnreferencedFileIds,
+    totalUploadedBytes,
+    orphanedFileIds: difference(previousFileIds, summary.fileIdsReferenced),
+    summary,
+  };
+}
+
+export async function inspectSelfHostedRoom({
+  roomUrl,
+}: InspectRoomArgs = {}): Promise<RoomInspectionResult> {
+  const firebaseConfig = parseFirebaseConfig();
+  const room = resolveRoomUrl(roomUrl);
+  const { document, sceneVersion } = await readExistingScene(firebaseConfig.projectId, room.roomId);
+  const elements = document ? await decryptElements(room.roomKey, document) : [];
+  const referencedFileIds = getReferencedFileIds(elements);
+
+  return {
+    roomId: room.roomId,
+    roomUrl: room.roomUrl,
+    sceneVersion,
+    summary: createSceneSummary(elements, {}, referencedFileIds),
   };
 }
 

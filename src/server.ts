@@ -7,7 +7,11 @@ import path from "node:path";
 import { deflateSync } from "node:zlib";
 import { z } from "zod/v4";
 import type { CheckpointStore } from "./checkpoint-store.js";
-import { getDefaultSelfHostedRoomUrl, saveSceneToSelfHostedRoom } from "./self-hosted-room.js";
+import {
+  getDefaultSelfHostedRoomUrl,
+  inspectSelfHostedRoom,
+  saveSceneToSelfHostedRoom,
+} from "./self-hosted-room.js";
 
 /** Maximum allowed size for element/data input strings (5 MB). */
 const MAX_INPUT_BYTES = 5 * 1024 * 1024;
@@ -631,6 +635,35 @@ However, if the user wants to edit something on this diagram "${checkpointId}", 
       } catch (err) {
         return {
           content: [{ type: "text", text: `Room export failed: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ============================================================
+  // Tool 3c: inspect_self_hosted_room (server-side room summary)
+  // Called by widget or model.
+  // ============================================================
+  registerAppTool(server,
+    "inspect_self_hosted_room",
+    {
+      description: "Summarize the current state of a self-hosted Excalidraw collaboration room.",
+      inputSchema: {
+        roomUrl: z.string().optional().describe("Optional room URL with #room=<roomId>,<roomKey>"),
+      },
+      _meta: { ui: { visibility: ["all"] } },
+    },
+    async ({ roomUrl }): Promise<CallToolResult> => {
+      try {
+        const result = await inspectSelfHostedRoom({ roomUrl });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          structuredContent: result,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Room inspect failed: ${(err as Error).message}` }],
           isError: true,
         };
       }
