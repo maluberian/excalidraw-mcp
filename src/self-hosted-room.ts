@@ -1,4 +1,7 @@
 import { io, type Socket } from "socket.io-client";
+import { getStorage, ref, uploadBytes } from "firebase/storage";
+import { initializeApp, getApps, getApp, type FirebaseApp } from "firebase/app";
+import { deflate } from "pako";
 
 type FirestoreValue =
   | { integerValue: string }
@@ -24,7 +27,19 @@ type ExcalidrawElementLike = {
   updated?: number;
   version?: number;
   versionNonce?: number;
+  type?: string;
+  fileId?: string;
+  status?: string;
   [key: string]: unknown;
+};
+
+type BinaryFileLike = {
+  id?: string;
+  mimeType?: string;
+  dataURL: string;
+  created?: number;
+  lastRetrieved?: number;
+  version?: number;
 };
 
 type ParsedRoom = {
@@ -61,6 +76,13 @@ const SOCKET_EVENT_ROOM_USER_CHANGE = "room-user-change";
 const SOCKET_EVENT_FIRST_IN_ROOM = "first-in-room";
 const SOCKET_EVENT_SERVER_BROADCAST = "server-broadcast";
 const WS_SUBTYPE_UPDATE = "SCENE_UPDATE";
+const FILE_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
+const FILE_CACHE_MAX_AGE_SEC = 31536000;
+const FILES_PREFIX = "/files/rooms";
+const CONCAT_BUFFERS_VERSION = 1;
+const VERSION_DATAVIEW_BYTES = 4;
+const NEXT_CHUNK_SIZE_DATAVIEW_BYTES = 4;
+let firebaseApp: FirebaseApp | null = null;
 
 function parseFirebaseConfig(): FirebaseConfig {
   let parsed: unknown;
@@ -106,7 +128,10 @@ function resolveRoomUrl(roomUrl?: string): ParsedRoom {
   return parseRoomUrl(resolved);
 }
 
-function decodeSceneJson(json: string): { elements: ExcalidrawElementLike[] } {
+function decodeSceneJson(json: string): {
+  elements: ExcalidrawElementLike[];
+  files: Record<string, BinaryFileLike>;
+} {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -122,7 +147,14 @@ function decodeSceneJson(json: string): { elements: ExcalidrawElementLike[] } {
     throw new Error("Serialized Excalidraw JSON is missing an elements array.");
   }
 
-  return { elements: (parsed as { elements: ExcalidrawElementLike[] }).elements };
+  return {
+    elements: (parsed as { elements: ExcalidrawElementLike[] }).elements,
+    files:
+      (parsed as { files?: Record<string, BinaryFileLike> }).files &&
+      typeof (parsed as { files?: Record<string, BinaryFileLike> }).files === "object"
+        ? (parsed as { files: Record<string, BinaryFileLike> }).files
+        : {},
+  };
 }
 
 async function importRoomKey(roomKey: string, usage: "encrypt" | "decrypt") {
@@ -163,6 +195,74 @@ async function encryptBuffer(
   };
 }
 
+function dataView(
+  buffer: Uint8Array,
+  bytes: 1 | 2 | 4,
+  offset: number,
+  value?: number,
+): Uint8Array | number {
+  const bits = bytes === 1 ? 8 : bytes === 2 ? 16 : 32;
+  if (value != null) {
+    const method = `setUint${bits}` as const;
+    new DataView(buffer.buffer)[method](offset, value);
+    return buffer;
+  }
+  const method = `getUint${bits}` as const;
+  return new DataView(buffer.buffer)[method](offset);
+}
+
+function concatBuffers(...buffers: Uint8Array[]): Uint8Array {
+  const bufferView = new Uint8Array(
+    VERSION_DATAVIEW_BYTES +
+      NEXT_CHUNK_SIZE_DATAVIEW_BYTES * buffers.length +
+      buffers.reduce((acc, buffer) => acc + buffer.byteLength, 0),
+  );
+
+  let cursor = 0;
+  dataView(bufferView, VERSION_DATAVIEW_BYTES, cursor, CONCAT_BUFFERS_VERSION);
+  cursor += VERSION_DATAVIEW_BYTES;
+
+  for (const buffer of buffers) {
+    dataView(
+      bufferView,
+      NEXT_CHUNK_SIZE_DATAVIEW_BYTES,
+      cursor,
+      buffer.byteLength,
+    );
+    cursor += NEXT_CHUNK_SIZE_DATAVIEW_BYTES;
+    bufferView.set(buffer, cursor);
+    cursor += buffer.byteLength;
+  }
+
+  return bufferView;
+}
+
+async function encodeFileForUpload(
+  fileId: string,
+  fileData: BinaryFileLike,
+  roomKey: string,
+): Promise<Uint8Array> {
+  const sourceBytes = new TextEncoder().encode(fileData.dataURL);
+  const contentsMetadataBuffer = new TextEncoder().encode(
+    JSON.stringify({
+      id: fileId,
+      mimeType: fileData.mimeType ?? "application/octet-stream",
+      created: fileData.created ?? Date.now(),
+      lastRetrieved: fileData.lastRetrieved ?? Date.now(),
+    }),
+  );
+  const encodingMetadataBuffer = new TextEncoder().encode(
+    JSON.stringify({
+      version: 2,
+      compression: "pako@1",
+      encryption: "AES-GCM",
+    }),
+  );
+  const compressed = deflate(concatBuffers(contentsMetadataBuffer, sourceBytes));
+  const { ciphertext, iv } = await encryptBuffer(roomKey, compressed);
+  return concatBuffers(encodingMetadataBuffer, iv, ciphertext);
+}
+
 async function encryptElements(
   roomKey: string,
   elements: ExcalidrawElementLike[],
@@ -196,6 +296,68 @@ async function decryptElements(
 
 function encodeBytes(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64");
+}
+
+function getFirebaseApp(firebaseConfig: FirebaseConfig): FirebaseApp {
+  if (firebaseApp) {
+    return firebaseApp;
+  }
+  firebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
+  return firebaseApp;
+}
+
+async function saveFilesToFirebaseStorage(
+  firebaseConfig: FirebaseConfig,
+  roomId: string,
+  roomKey: string,
+  files: Record<string, BinaryFileLike>,
+): Promise<Set<string>> {
+  const storage = getStorage(getFirebaseApp(firebaseConfig));
+  const savedFileIds = new Set<string>();
+  const fileEntries = Object.entries(files);
+
+  await Promise.all(
+    fileEntries.map(async ([fileId, fileData]) => {
+      if (!fileData?.dataURL) {
+        return;
+      }
+
+      const sourceBytes = new TextEncoder().encode(fileData.dataURL);
+      if (sourceBytes.byteLength > FILE_UPLOAD_MAX_BYTES) {
+        throw new Error(`File ${fileId} exceeds ${Math.trunc(FILE_UPLOAD_MAX_BYTES / 1024 / 1024)}MB.`);
+      }
+
+      const encodedFile = await encodeFileForUpload(fileId, fileData, roomKey);
+
+      const storageRef = ref(storage, `${FILES_PREFIX}/${roomId}/${fileId}`);
+      await uploadBytes(storageRef, encodedFile, {
+        cacheControl: `public, max-age=${FILE_CACHE_MAX_AGE_SEC}`,
+        contentType: "application/octet-stream",
+      });
+      savedFileIds.add(fileId);
+    }),
+  );
+
+  return savedFileIds;
+}
+
+function markUploadedImageElements(
+  elements: ExcalidrawElementLike[],
+  savedFileIds: Set<string>,
+): ExcalidrawElementLike[] {
+  if (!savedFileIds.size) {
+    return elements;
+  }
+
+  return elements.map((element) => {
+    if (element.type === "image" && element.fileId && savedFileIds.has(element.fileId)) {
+      return {
+        ...element,
+        status: "saved",
+      };
+    }
+    return element;
+  });
 }
 
 function firestoreDocumentUrl(projectId: string, roomId: string): string {
@@ -334,14 +496,21 @@ export async function saveSceneToSelfHostedRoom({
 }: SaveSceneArgs): Promise<RoomSaveResult> {
   const firebaseConfig = parseFirebaseConfig();
   const room = resolveRoomUrl(roomUrl);
-  const { elements } = decodeSceneJson(json);
+  const { elements, files } = decodeSceneJson(json);
+  const savedFileIds = await saveFilesToFirebaseStorage(
+    firebaseConfig,
+    room.roomId,
+    room.roomKey,
+    files,
+  );
+  const persistedElements = markUploadedImageElements(elements, savedFileIds);
   const { document, sceneVersion: previousVersion } = await readExistingScene(
     firebaseConfig.projectId,
     room.roomId,
   );
   const previousElements = document ? await decryptElements(room.roomKey, document) : [];
-  const broadcastElements = buildBroadcastElements(elements, previousElements);
-  const { ciphertext, iv } = await encryptElements(room.roomKey, elements);
+  const broadcastElements = buildBroadcastElements(persistedElements, previousElements);
+  const { ciphertext, iv } = await encryptElements(room.roomKey, persistedElements);
   const nextVersion = previousVersion + 1;
 
   const response = await fetch(
