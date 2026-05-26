@@ -49,13 +49,16 @@ Set these environment variables on the MCP server if you want the UI's share but
 ```bash
 EXCALIDRAW_SELF_HOSTED_ROOM_URL='https://excalidraw.example.net/#room=<roomId>,<roomKey>'
 EXCALIDRAW_FIREBASE_CONFIG='{"apiKey":"...","projectId":"...","authDomain":"...","databaseURL":"...","storageBucket":"...","messagingSenderId":"...","appId":"..."}'
+EXCALIDRAW_SELF_HOSTED_COLLAB_URL='https://excalidraw-collab.example.net'
 ```
 
 Notes:
 
 - `EXCALIDRAW_SELF_HOSTED_ROOM_URL` is optional for server-side tool calls, but required if you want the UI button to open a shared room instead of `excalidraw.com`.
 - `EXCALIDRAW_FIREBASE_CONFIG` defaults to the current `sitesoftllc.net` deployment values in this fork. Override it if your room persistence backend differs.
-- The current adapter writes scene elements only. Live websocket broadcast and binary file persistence are still separate follow-up work.
+- The current adapter writes scene elements to Firestore and also emits a live `SCENE_UPDATE` broadcast to the collaboration room.
+- Removed elements are sent as tombstones during live sync so connected clients can reconcile deletions.
+- Binary file/image persistence is still separate follow-up work.
 
 ## What are MCP Apps and how can I build one?
 
