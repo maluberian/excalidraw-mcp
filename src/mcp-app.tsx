@@ -147,7 +147,47 @@ async function shareToExcalidraw(data: {elements: any[], appState: any, files: a
   }
 }
 
-function ShareButton({ onConfirm, compact }: { onConfirm: () => Promise<void>; compact?: boolean }) {
+async function shareToSelfHostedRoom(
+  data: {elements: any[], appState: any, files: any},
+  app: App,
+  roomUrl?: string,
+) {
+  try {
+    if (!data.elements?.length) return;
+
+    const json = serializeAsJSON(data.elements, data.appState, data.files, "database");
+    const result = await app.callServerTool({
+      name: "export_to_self_hosted_room",
+      arguments: roomUrl ? { json, roomUrl } : { json },
+    });
+
+    if (result.isError) {
+      fsLog(`room export failed: ${JSON.stringify(result.content)}`);
+      return;
+    }
+
+    const url = (result.content[0] as any).text;
+    await app.openLink({ url });
+  } catch (err) {
+    fsLog(`shareToSelfHostedRoom error: ${err}`);
+  }
+}
+
+function ShareButton({
+  onConfirm,
+  compact,
+  buttonLabel = "Open in Excalidraw",
+  confirmActionLabel = "Open in Excalidraw",
+  confirmText = "This will upload your diagram to excalidraw.com and open it in a new tab.",
+  confirmTitle = "Export to Excalidraw",
+}: {
+  onConfirm: () => Promise<void>;
+  compact?: boolean;
+  buttonLabel?: string;
+  confirmActionLabel?: string;
+  confirmText?: string;
+  confirmTitle?: string;
+}) {
   const [state, setState] = useState<"idle" | "confirm" | "uploading">("idle");
 
   const handleConfirm = async () => {
@@ -169,22 +209,20 @@ function ShareButton({ onConfirm, compact }: { onConfirm: () => Promise<void>; c
         onClick={() => setState("confirm")}
       >
         <ExternalLinkIcon />
-        {!compact && <span style={{ fontSize: "0.75rem", fontWeight: 400 }}>{state === "uploading" ? "Exporting…" : "Open in Excalidraw"}</span>}
+        {!compact && <span style={{ fontSize: "0.75rem", fontWeight: 400 }}>{state === "uploading" ? "Exporting…" : buttonLabel}</span>}
       </button>
 
       {state === "confirm" && (
         <div className="excalidraw export-modal-overlay" onClick={() => setState("idle")}>
           <div className="Island export-modal" onClick={(e) => e.stopPropagation()}>
-            <h3 className="export-modal-title">Export to Excalidraw</h3>
-            <p className="export-modal-text">
-              This will upload your diagram to excalidraw.com and open it in a new tab.
-            </p>
+            <h3 className="export-modal-title">{confirmTitle}</h3>
+            <p className="export-modal-text">{confirmText}</p>
             <div className="export-modal-actions">
               <button className="standalone" onClick={() => setState("idle")}>
                 Cancel
               </button>
               <button className="standalone export-modal-confirm" onClick={handleConfirm}>
-                Open in Excalidraw
+                {confirmActionLabel}
               </button>
             </div>
           </div>
@@ -668,6 +706,14 @@ export function ExcalidrawAppCore({ app }: { app: App }) {
   const svgViewportRef = useRef<ViewportRect | null>(null);
   const elementsRef = useRef<any[]>([]);
   const checkpointIdRef = useRef<string | null>(null);
+  const configuredSelfHostedRoomUrl =
+    typeof (window as any).__EXCALIDRAW_SELF_HOSTED_ROOM_URL__ === "string"
+      ? (window as any).__EXCALIDRAW_SELF_HOSTED_ROOM_URL__
+      : undefined;
+  const selfHostedRoomUrl =
+    typeof toolInput?.selfHostedRoomUrl === "string"
+      ? toolInput.selfHostedRoomUrl
+      : configuredSelfHostedRoomUrl;
 
   const toggleFullscreen = useCallback(async () => {
     if (!appRef.current) return;
@@ -866,14 +912,26 @@ export function ExcalidrawAppCore({ app }: { app: App }) {
       {displayMode === "inline" && (
         <div className="toolbar">
           <ShareButton
-                onConfirm={async () => {
-                  await shareToExcalidraw({
-                    elements,
-                    appState: {},
-                    files: {}
-                  }, app);
-                }}
-              />
+            onConfirm={async () => {
+              if (selfHostedRoomUrl) {
+                await shareToSelfHostedRoom({
+                  elements,
+                  appState: {},
+                  files: {},
+                }, app, selfHostedRoomUrl);
+                return;
+              }
+              await shareToExcalidraw({
+                elements,
+                appState: {},
+                files: {},
+              }, app);
+            }}
+            buttonLabel={selfHostedRoomUrl ? "Open in Shared Room" : undefined}
+            confirmActionLabel={selfHostedRoomUrl ? "Overwrite Room" : undefined}
+            confirmText={selfHostedRoomUrl ? "This will replace the scene in the configured self-hosted collaboration room and open that room in a new tab." : undefined}
+            confirmTitle={selfHostedRoomUrl ? "Export to Shared Room" : undefined}
+          />
 
           <button
             className="app-button"
@@ -906,10 +964,17 @@ export function ExcalidrawAppCore({ app }: { app: App }) {
                     const elements = excalidrawApi.getSceneElements();
                     const appState = excalidrawApi.getAppState();
                     const files = excalidrawApi.getFiles();
-
+                    if (selfHostedRoomUrl) {
+                      await shareToSelfHostedRoom({ elements, appState, files }, app, selfHostedRoomUrl);
+                      return;
+                    }
                     await shareToExcalidraw({ elements, appState, files }, app);
                   }
                 }}
+                buttonLabel={selfHostedRoomUrl ? "Open in Shared Room" : undefined}
+                confirmActionLabel={selfHostedRoomUrl ? "Overwrite Room" : undefined}
+                confirmText={selfHostedRoomUrl ? "This will replace the scene in the configured self-hosted collaboration room and open that room in a new tab." : undefined}
+                confirmTitle={selfHostedRoomUrl ? "Export to Shared Room" : undefined}
               />
             )}
           >
@@ -965,9 +1030,17 @@ export function ExcalidrawAppCore({ app }: { app: App }) {
                     const elements = excalidrawApi.getSceneElements();
                     const appState = excalidrawApi.getAppState();
                     const files = excalidrawApi.getFiles();
+                    if (selfHostedRoomUrl) {
+                      await shareToSelfHostedRoom({ elements, appState, files }, app, selfHostedRoomUrl);
+                      return;
+                    }
                     await shareToExcalidraw({ elements, appState, files }, app);
                   }
                 }}
+                buttonLabel={selfHostedRoomUrl ? "Open in Shared Room" : undefined}
+                confirmActionLabel={selfHostedRoomUrl ? "Overwrite Room" : undefined}
+                confirmText={selfHostedRoomUrl ? "This will replace the scene in the configured self-hosted collaboration room and open that room in a new tab." : undefined}
+                confirmTitle={selfHostedRoomUrl ? "Export to Shared Room" : undefined}
               />
             </div>
           )}
