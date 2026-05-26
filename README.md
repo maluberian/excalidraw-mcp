@@ -58,7 +58,7 @@ Notes:
 - `EXCALIDRAW_FIREBASE_CONFIG` defaults to the current `sitesoftllc.net` deployment values in this fork. Override it if your room persistence backend differs.
 - The current adapter writes scene elements to Firestore and also emits a live `SCENE_UPDATE` broadcast to the collaboration room.
 - Removed elements are sent as tombstones during live sync so connected clients can reconcile deletions.
-- Binary file/image persistence is still separate follow-up work.
+- Image and binary file payloads are uploaded to Firebase Storage under the room file prefix, using the same encrypted/compressed format Excalidraw expects.
 
 ## What are MCP Apps and how can I build one?
 
